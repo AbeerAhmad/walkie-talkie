@@ -4,10 +4,15 @@
   "description": "Backend server for walkie talkie app with real-time audio streaming",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node api.js && node server.js",
+    "dev": "node api.js && nodemon server.js"
   },
-  "keywords": ["walkie-talkie", "real-time", "audio", "socket.io"],
+  "keywords": [
+    "walkie-talkie",
+    "real-time",
+    "audio",
+    "socket.io"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
@@ -19,4 +24,3 @@
     "nodemon": "^3.0.1"
   }
 }
-

@@ -3,24 +3,24 @@
   "version": "1.0.0",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
-    "start": "expo start",
+    "start": "node api.js && expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
   },
   "dependencies": {
-    "expo": "~50.0.0",
-    "expo-av": "~13.10.4",
-    "expo-status-bar": "~1.11.1",
-    "react": "18.2.0",
-    "react-native": "0.73.2",
-    "socket.io-client": "^4.6.1",
-    "expo-linear-gradient": "~12.7.0",
-    "@expo/vector-icons": "^14.0.0"
+    "@expo/vector-icons": "^15.0.3",
+    "expo": "~54.0.0",
+    "expo-av": "~16.0.7",
+    "expo-file-system": "^19.0.17",
+    "expo-linear-gradient": "~15.0.7",
+    "expo-status-bar": "~3.0.8",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "socket.io-client": "^4.6.1"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0"
   },
   "private": true
 }
-

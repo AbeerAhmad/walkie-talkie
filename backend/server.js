@@ -6,116 +6,174 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// Configure CORS for Express
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Configure Socket.io with CORS
+// Socket.io with safer buffer limit
 const io = socketIo(server, {
   cors: {
     origin: '*',
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST'],
   },
-  maxHttpBufferSize: 1e8 // 100 MB for audio data
+  maxHttpBufferSize: 5e6, // 5 MB (enough for short clips)
 });
 
 // Store active channels and their users
 const channels = new Map();
 
-// Health check endpoint
+// Health check
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     channels: Array.from(channels.keys()),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
-// Get channel info
+// Channel info
 app.get('/channels', (req, res) => {
   const channelInfo = Array.from(channels.entries()).map(([id, users]) => ({
     id,
     userCount: users.size,
-    users: Array.from(users.values())
+    users: Array.from(users.values()),
   }));
   res.json(channelInfo);
 });
 
 io.on('connection', (socket) => {
-  console.log(`New client connected: ${socket.id}`);
-  
+  // console.log(`New client connected: ${socket.id}`);
+  // console.log(`Total connections: ${io.sockets.sockets.size}`);
+
   let currentChannel = null;
   let username = 'Anonymous';
 
-  // Join a channel
-  socket.on('join-channel', (data) => {
-    const { channelId, userName } = data;
-    
-    // Leave previous channel if exists
-    if (currentChannel) {
-      leaveChannel(socket, currentChannel);
-    }
-    
-    currentChannel = channelId;
-    username = userName || 'Anonymous';
-    
-    // Create channel if it doesn't exist
-    if (!channels.has(channelId)) {
-      channels.set(channelId, new Map());
-    }
-    
-    // Add user to channel
-    channels.get(channelId).set(socket.id, { id: socket.id, username });
-    socket.join(channelId);
-    
-    console.log(`User ${username} (${socket.id}) joined channel: ${channelId}`);
-    
-    // Notify user of successful join
-    socket.emit('joined-channel', {
-      channelId,
-      users: Array.from(channels.get(channelId).values())
-    });
-    
-    // Notify other users in the channel
-    socket.to(channelId).emit('user-joined', {
-      userId: socket.id,
-      username,
-      users: Array.from(channels.get(channelId).values())
-    });
+  socket.on('error', (error) => {
+    console.error(`Socket error for ${socket.id}:`, error);
   });
 
-  // Handle audio data streaming
+  // Join a channel
+  socket.on('join-channel', (data) => {
+    try {
+      if (!data) {
+        console.warn(`Socket ${socket.id} tried to join channel without data`);
+        socket.emit('error', { message: 'Invalid join request' });
+        return;
+      }
+
+      const { channelId, userName } = data;
+
+      if (!channelId || typeof channelId !== 'string' || channelId.trim() === '') {
+        console.warn(`Socket ${socket.id} tried to join with invalid channelId`);
+        socket.emit('error', { message: 'Invalid channel ID' });
+        return;
+      }
+
+      // Leave previous channel
+      if (currentChannel) {
+        leaveChannel(socket, currentChannel);
+      }
+
+      currentChannel = channelId.trim();
+      username =
+        userName && typeof userName === 'string' && userName.trim() !== ''
+          ? userName.trim()
+          : 'Anonymous';
+
+      // Create channel if not exists
+      if (!channels.has(currentChannel)) {
+        channels.set(currentChannel, new Map());
+        // console.log(`New channel created: ${currentChannel}`);
+      }
+
+      // Add user to channel
+      channels.get(currentChannel).set(socket.id, { id: socket.id, username });
+      socket.join(currentChannel);
+
+      // console.log(`User ${username} (${socket.id}) joined channel: ${currentChannel}`);
+
+      // Notify user
+      socket.emit('joined-channel', {
+        channelId: currentChannel,
+        users: Array.from(channels.get(currentChannel).values()),
+      });
+
+      // Notify others
+      socket.to(currentChannel).emit('user-joined', {
+        userId: socket.id,
+        username,
+        users: Array.from(channels.get(currentChannel).values()),
+      });
+    } catch (error) {
+      console.error(`Error handling join-channel from ${socket.id}:`, error);
+      socket.emit('error', { message: 'Failed to join channel' });
+    }
+  });
+
+  // Audio data (single clip after user releases button)
   socket.on('audio-data', (data) => {
-    if (currentChannel) {
-      // Broadcast audio to all other users in the channel
+    try {
+      if (!currentChannel) {
+        console.warn(`User ${username} (${socket.id}) tried to send audio but not in a channel`);
+        return;
+      }
+
+      if (!data || !data.audioData || typeof data.audioData !== 'string') {
+        console.warn(`User ${username} (${socket.id}) sent invalid audio data`);
+        return;
+      }
+
+      // const audioDataLength = data.audioData.length;
+      // console.log(
+      //   `User ${username} (${socket.id}) sending audio to channel ${currentChannel}, base64 length: ${audioDataLength}`
+      // );
+
+      const channelUsers = channels.get(currentChannel);
+      // const userCount = channelUsers ? channelUsers.size : 0;
+      // const recipientCount = userCount > 0 ? userCount - 1 : 0;
+
       socket.to(currentChannel).emit('audio-stream', {
         userId: socket.id,
         username,
         audioData: data.audioData,
-        timestamp: Date.now()
+        timestamp: Date.now(),
       });
+
+      // console.log(`Audio broadcasted to ${recipientCount} user(s) in channel ${currentChannel}`);
+    } catch (error) {
+      console.error(`Error handling audio data from ${username} (${socket.id}):`, error);
     }
   });
 
-  // Handle push-to-talk start
+  // Push-to-talk start
   socket.on('start-talking', () => {
-    if (currentChannel) {
-      socket.to(currentChannel).emit('user-talking', {
-        userId: socket.id,
-        username,
-        isTalking: true
-      });
+    try {
+      if (currentChannel) {
+        socket.to(currentChannel).emit('user-talking', {
+          userId: socket.id,
+          username,
+          isTalking: true,
+        });
+        // console.log(`User ${username} (${socket.id}) started talking in channel ${currentChannel}`);
+      }
+    } catch (error) {
+      console.error(`Error handling start-talking from ${socket.id}:`, error);
     }
   });
 
-  // Handle push-to-talk stop
+  // Push-to-talk stop
   socket.on('stop-talking', () => {
-    if (currentChannel) {
-      socket.to(currentChannel).emit('user-talking', {
-        userId: socket.id,
-        username,
-        isTalking: false
-      });
+    try {
+      if (currentChannel) {
+        socket.to(currentChannel).emit('user-talking', {
+          userId: socket.id,
+          username,
+          isTalking: false,
+        });
+        // console.log(`User ${username} (${socket.id}) stopped talking in channel ${currentChannel}`);
+      }
+    } catch (error) {
+      console.error(`Error handling stop-talking from ${socket.id}:`, error);
     }
   });
 
@@ -127,39 +185,39 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle disconnect
-  socket.on('disconnect', () => {
-    console.log(`Client disconnected: ${socket.id}`);
+  // Disconnect
+  socket.on('disconnect', (reason) => {
+    // console.log(`Client disconnected: ${socket.id}, reason: ${reason}`);
     if (currentChannel) {
       leaveChannel(socket, currentChannel);
+      currentChannel = null;
     }
+    // console.log(`Remaining connections: ${io.sockets.sockets.size}`);
   });
 });
 
-// Helper function to leave a channel
+// Helper for leaving a channel
 function leaveChannel(socket, channelId) {
-  if (channels.has(channelId)) {
-    const channelUsers = channels.get(channelId);
-    const user = channelUsers.get(socket.id);
-    
-    channelUsers.delete(socket.id);
-    socket.leave(channelId);
-    
-    // Notify other users
-    socket.to(channelId).emit('user-left', {
-      userId: socket.id,
-      username: user?.username,
-      users: Array.from(channelUsers.values())
-    });
-    
-    // Remove channel if empty
-    if (channelUsers.size === 0) {
-      channels.delete(channelId);
-      console.log(`Channel ${channelId} removed (empty)`);
-    }
-    
-    console.log(`User ${user?.username} (${socket.id}) left channel: ${channelId}`);
+  if (!channels.has(channelId)) return;
+
+  const channelUsers = channels.get(channelId);
+  const user = channelUsers.get(socket.id);
+
+  channelUsers.delete(socket.id);
+  socket.leave(channelId);
+
+  socket.to(channelId).emit('user-left', {
+    userId: socket.id,
+    username: user?.username,
+    users: Array.from(channelUsers.values()),
+  });
+
+  if (channelUsers.size === 0) {
+    channels.delete(channelId);
+    // console.log(`Channel ${channelId} removed (empty)`);
   }
+
+  // console.log(`User ${user?.username || 'Unknown'} (${socket.id}) left channel: ${channelId}`);
 }
 
 const PORT = process.env.PORT || 3000;
@@ -167,5 +225,26 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🚀 Walkie Talkie Server running on port ${PORT}`);
   console.log(`📡 WebSocket server ready for connections`);
+  console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 Channels info: http://localhost:${PORT}/channels`);
 });
 
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully...');
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
