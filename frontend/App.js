@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system/legacy';
 import io from 'socket.io-client';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons, Ionicons, FontAwesome5 } from '@expo/vector-icons';
@@ -21,7 +22,7 @@ import { MaterialIcons, Ionicons, FontAwesome5 } from '@expo/vector-icons';
 const { width, height } = Dimensions.get('window');
 
 // REPLACE WITH YOUR SERVER URL
-const SERVER_URL = 'http://192.168.1.100:3000'; // Change to your computer's IP address
+const SERVER_URL = 'http://192.168.100.62:3000'; // Your computer's IP address
 
 export default function App() {
   const [socket, setSocket] = useState(null);
@@ -36,17 +37,32 @@ export default function App() {
 
   const recordingRef = useRef(null);
   const soundRef = useRef(null);
+  const socketRef = useRef(null);
+
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const glowAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnimationRef = useRef(null);
 
   useEffect(() => {
     setupAudio();
     connectToServer();
 
     return () => {
-      if (socket) {
-        socket.disconnect();
+      // Disconnect socket
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+        socketRef.current = null;
       }
+
+      // Stop animations
+      if (pulseAnimationRef.current) {
+        pulseAnimationRef.current.stop();
+        pulseAnimationRef.current = null;
+      }
+      pulseAnim.stopAnimation();
+      glowAnim.stopAnimation();
+
+      // Cleanup audio resources
       cleanupAudio();
     };
   }, []);
@@ -55,13 +71,16 @@ export default function App() {
     try {
       const { status } = await Audio.requestPermissionsAsync();
       setHasPermission(status === 'granted');
-      
+
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
         staysActiveInBackground: true,
         playThroughEarpieceAndroid: false,
+        shouldDuckAndroid: true,
       });
+
+      console.log('Audio mode configured');
     } catch (error) {
       console.error('Failed to setup audio:', error);
       Alert.alert('Error', 'Failed to setup audio permissions');
@@ -76,6 +95,9 @@ export default function App() {
       reconnectionAttempts: 10,
     });
 
+    socketRef.current = newSocket;
+    setSocket(newSocket);
+
     newSocket.on('connect', () => {
       console.log('Connected to server');
       setIsConnected(true);
@@ -84,26 +106,39 @@ export default function App() {
     newSocket.on('disconnect', () => {
       console.log('Disconnected from server');
       setIsConnected(false);
+      setIsInChannel(false);
+      setUsers([]);
+      setActiveSpeaker(null);
     });
 
     newSocket.on('joined-channel', (data) => {
       console.log('Joined channel:', data);
-      setUsers(data.users);
+      setUsers(data.users || []);
       setIsInChannel(true);
     });
 
     newSocket.on('user-joined', (data) => {
       console.log('User joined:', data);
-      setUsers(data.users);
+      setUsers(data.users || []);
     });
 
     newSocket.on('user-left', (data) => {
       console.log('User left:', data);
-      setUsers(data.users);
+      setUsers(data.users || []);
     });
 
     newSocket.on('audio-stream', async (data) => {
-      await playAudioData(data.audioData);
+      console.log('Received audio stream from:', data.username);
+      if (data.audioData) {
+        setActiveSpeaker(data.username || 'Unknown');
+        await playAudioData(data.audioData);
+        // Clear indicator slightly after playback
+        setTimeout(() => {
+          setActiveSpeaker(null);
+        }, 500);
+      } else {
+        console.warn('No audio data in stream');
+      }
     });
 
     newSocket.on('user-talking', (data) => {
@@ -114,10 +149,17 @@ export default function App() {
       }
     });
 
-    setSocket(newSocket);
+    newSocket.on('error', (err) => {
+      console.error('Socket error event:', err);
+    });
   };
 
   const joinChannel = () => {
+    if (!socketRef.current || !socketRef.current.connected) {
+      Alert.alert('Error', 'Not connected to server');
+      return;
+    }
+
     if (!username.trim() || !currentChannel.trim()) {
       Alert.alert('Error', 'Please enter both username and channel name');
       return;
@@ -128,19 +170,19 @@ export default function App() {
       return;
     }
 
-    socket.emit('join-channel', {
+    socketRef.current.emit('join-channel', {
       channelId: currentChannel.trim(),
       userName: username.trim(),
     });
   };
 
   const leaveChannel = () => {
-    if (socket && isInChannel) {
-      socket.emit('leave-channel');
-      setIsInChannel(false);
-      setUsers([]);
-      setActiveSpeaker(null);
+    if (socketRef.current && isInChannel) {
+      socketRef.current.emit('leave-channel');
     }
+    setIsInChannel(false);
+    setUsers([]);
+    setActiveSpeaker(null);
   };
 
   const startRecording = async () => {
@@ -148,13 +190,33 @@ export default function App() {
       Alert.alert('Error', 'Microphone permission is required');
       return;
     }
+    if (!socketRef.current || !socketRef.current.connected) {
+      Alert.alert('Error', 'Not connected to server');
+      return;
+    }
+
+    // Prevent double-record
+    if (recordingRef.current) {
+      try {
+        const status = await recordingRef.current.getStatusAsync();
+        if (status.isRecording) {
+          console.log('Already recording, skipping...');
+          return;
+        }
+      } catch {
+        recordingRef.current = null;
+      }
+    }
 
     try {
       setIsTalking(true);
-      socket.emit('start-talking');
-      
+      socketRef.current.emit('start-talking');
+
       // Start pulse animation
-      Animated.loop(
+      if (pulseAnimationRef.current) {
+        pulseAnimationRef.current.stop();
+      }
+      pulseAnimationRef.current = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
             toValue: 1.2,
@@ -167,127 +229,246 @@ export default function App() {
             useNativeDriver: true,
           }),
         ])
-      ).start();
+      );
+      pulseAnimationRef.current.start();
 
       Animated.timing(glowAnim, {
         toValue: 1,
         duration: 300,
-        useNativeDriver: false,
+        useNativeDriver: true,
       }).start();
 
+      // Cleanup old recording
+      if (recordingRef.current) {
+        try {
+          const status = await recordingRef.current.getStatusAsync();
+          if (status.isRecording || status.canRecord) {
+            await recordingRef.current.stopAndUnloadAsync();
+          }
+        } catch {}
+        recordingRef.current = null;
+      }
+
+      if (Platform.OS === 'ios') {
+        try {
+          await Audio.setAudioModeAsync({
+            allowsRecordingIOS: true,
+            playsInSilentModeIOS: true,
+            staysActiveInBackground: true,
+            playThroughEarpieceAndroid: false,
+            shouldDuckAndroid: true,
+            interruptionModeIOS: Audio.INTERRUPTION_MODE_IOS_MIX_WITH_OTHERS,
+            interruptionModeAndroid: Audio.INTERRUPTION_MODE_ANDROID_DO_NOT_MIX,
+          });
+        } catch (e) {
+          console.log('iOS recording audio mode setup:', e);
+        }
+      }
+
       const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync({
+
+      // Lighter audio config for walkie-talkie
+      const recordingOptions = {
         android: {
           extension: '.m4a',
           outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_MPEG_4,
           audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_AAC,
-          sampleRate: 44100,
+          sampleRate: 16000,
           numberOfChannels: 1,
-          bitRate: 128000,
+          bitRate: 64000,
         },
         ios: {
           extension: '.m4a',
           outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_MPEG4AAC,
-          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
-          sampleRate: 44100,
+          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_MEDIUM,
+          sampleRate: 16000,
           numberOfChannels: 1,
-          bitRate: 128000,
+          bitRate: 64000,
           linearPCMBitDepth: 16,
           linearPCMIsBigEndian: false,
           linearPCMIsFloat: false,
         },
-      });
+        web: {
+          mimeType: 'audio/webm',
+          bitsPerSecond: 64000,
+        },
+      };
 
+      await recording.prepareToRecordAsync(recordingOptions);
       await recording.startAsync();
+      console.log('Recording started');
       recordingRef.current = recording;
-
-      // Stream audio data periodically
-      const streamInterval = setInterval(async () => {
-        if (recordingRef.current) {
-          try {
-            const uri = recordingRef.current.getURI();
-            if (uri) {
-              // In a production app, you'd read the audio file and send chunks
-              // For simplicity, we'll just signal that we're recording
-            }
-          } catch (error) {
-            console.error('Error streaming audio:', error);
-          }
-        }
-      }, 100);
-
-      recordingRef.current.streamInterval = streamInterval;
     } catch (error) {
       console.error('Failed to start recording:', error);
       Alert.alert('Error', 'Failed to start recording');
       setIsTalking(false);
+      stopAnimations();
     }
   };
 
+  const stopAnimations = () => {
+    if (pulseAnimationRef.current) {
+      pulseAnimationRef.current.stop();
+      pulseAnimationRef.current = null;
+    }
+    pulseAnim.stopAnimation();
+    pulseAnim.setValue(1);
+    Animated.timing(glowAnim, {
+      toValue: 0,
+      duration: 300,
+      useNativeDriver: true,
+    }).start();
+  };
+
   const stopRecording = async () => {
+    if (!socketRef.current || !socketRef.current.connected) {
+      setIsTalking(false);
+      stopAnimations();
+      return;
+    }
+
     try {
-      if (recordingRef.current) {
-        // Clear interval
-        if (recordingRef.current.streamInterval) {
-          clearInterval(recordingRef.current.streamInterval);
-        }
-
-        await recordingRef.current.stopAndUnloadAsync();
-        const uri = recordingRef.current.getURI();
-        
-        if (uri && socket) {
-          // Read the audio file and send it
-          const response = await fetch(uri);
-          const blob = await response.blob();
-          const reader = new FileReader();
-          
-          reader.onloadend = () => {
-            const base64Audio = reader.result.split(',')[1];
-            socket.emit('audio-data', { audioData: base64Audio });
-          };
-          
-          reader.readAsDataURL(blob);
-        }
-
-        recordingRef.current = null;
+      if (!recordingRef.current) {
+        console.log('No recording to stop');
+        setIsTalking(false);
+        stopAnimations();
+        socketRef.current.emit('stop-talking');
+        return;
       }
 
+      let uri = null;
+      try {
+        const status = await recordingRef.current.getStatusAsync();
+        if (status.isRecording) {
+          uri = recordingRef.current.getURI();
+          await recordingRef.current.stopAndUnloadAsync();
+        } else {
+          try {
+            uri = recordingRef.current.getURI();
+          } catch {
+            uri = null;
+          }
+        }
+      } catch (error) {
+        console.error('Error stopping recording:', error);
+        recordingRef.current = null;
+        setIsTalking(false);
+        stopAnimations();
+        socketRef.current.emit('stop-talking');
+        return;
+      }
+
+      if (uri) {
+        try {
+          const fileInfo = await FileSystem.getInfoAsync(uri);
+          if (!fileInfo.exists || !fileInfo.size) {
+            console.warn('Audio file missing or empty:', uri);
+          } else {
+            console.log('Audio file size:', fileInfo.size, 'bytes');
+            const base64Audio = await FileSystem.readAsStringAsync(uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+
+            if (base64Audio && base64Audio.length > 0) {
+              console.log('Sending audio data, base64 length:', base64Audio.length);
+              socketRef.current.emit('audio-data', { audioData: base64Audio });
+            } else {
+              console.warn('Empty audio data, not sending');
+            }
+          }
+        } catch (readError) {
+          console.error('Error reading audio file:', readError);
+        }
+      } else {
+        console.warn('No URI for recorded audio');
+      }
+
+      recordingRef.current = null;
       setIsTalking(false);
-      socket.emit('stop-talking');
-      
-      // Stop animations
-      pulseAnim.stopAnimation();
-      pulseAnim.setValue(1);
-      Animated.timing(glowAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: false,
-      }).start();
+      socketRef.current.emit('stop-talking');
+      stopAnimations();
     } catch (error) {
       console.error('Failed to stop recording:', error);
+      setIsTalking(false);
+      stopAnimations();
     }
   };
 
   const playAudioData = async (base64Audio) => {
+    if (!base64Audio || base64Audio.length === 0) {
+      console.warn('Empty audio data received');
+      return;
+    }
+
+    let tempFileUri = null;
     try {
-      // Clean up previous sound
+      console.log('Starting audio playback, data length:', base64Audio.length);
+
       if (soundRef.current) {
-        await soundRef.current.unloadAsync();
+        try {
+          await soundRef.current.unloadAsync();
+        } catch (unloadError) {
+          console.log('Error unloading previous sound:', unloadError);
+        }
+        soundRef.current = null;
       }
 
-      // Convert base64 to playable audio
-      const sound = new Audio.Sound();
-      await sound.loadAsync({
-        uri: `data:audio/m4a;base64,${base64Audio}`,
+      const fileName = 'last_audio.m4a'; // reuse same temp file
+      tempFileUri = `${FileSystem.cacheDirectory}${fileName}`;
+      console.log('Writing audio to:', tempFileUri);
+
+      await FileSystem.writeAsStringAsync(tempFileUri, base64Audio, {
+        encoding: FileSystem.EncodingType.Base64,
       });
-      
+
+      const fileInfo = await FileSystem.getInfoAsync(tempFileUri);
+      if (!fileInfo.exists || !fileInfo.size) {
+        throw new Error('Audio file was not created or empty');
+      }
+
+      console.log('Audio file verified, size:', fileInfo.size);
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: tempFileUri },
+        {
+          shouldPlay: true,
+          volume: 1.0,
+          isMuted: false,
+        }
+      );
+
       soundRef.current = sound;
-      await sound.playAsync();
-      
-      // Unload after playing
-      sound.setOnPlaybackStatusUpdate((status) => {
+
+      // Ensure playback mode
+      if (Platform.OS === 'ios') {
+        try {
+          await Audio.setAudioModeAsync({
+            allowsRecordingIOS: false,
+            playsInSilentModeIOS: true,
+            staysActiveInBackground: true,
+            playThroughEarpieceAndroid: false,
+            shouldDuckAndroid: true,
+            interruptionModeIOS: Audio.INTERRUPTION_MODE_IOS_MIX_WITH_OTHERS,
+            interruptionModeAndroid: Audio.INTERRUPTION_MODE_ANDROID_DO_NOT_MIX,
+          });
+        } catch (e) {
+          console.log('iOS audio mode for playback failed:', e);
+        }
+      }
+
+      await sound.setVolumeAsync(1.0);
+      await sound.setIsMutedAsync(false);
+
+      sound.setOnPlaybackStatusUpdate(async (status) => {
+        if (status.error) {
+          console.error('Playback error:', status.error);
+        }
         if (status.didJustFinish) {
-          sound.unloadAsync();
+          try {
+            await sound.unloadAsync();
+          } catch (unloadError) {
+            console.log('Error unloading sound:', unloadError);
+          }
         }
       });
     } catch (error) {
@@ -298,17 +479,23 @@ export default function App() {
   const cleanupAudio = async () => {
     if (recordingRef.current) {
       try {
-        await recordingRef.current.stopAndUnloadAsync();
-      } catch (error) {
-        console.error('Error cleaning up recording:', error);
+        const status = await recordingRef.current.getStatusAsync();
+        if (status.isRecording || status.canRecord) {
+          await recordingRef.current.stopAndUnloadAsync();
+        }
+      } catch {
+        console.log('Recording already cleaned up');
       }
+      recordingRef.current = null;
     }
+
     if (soundRef.current) {
       try {
         await soundRef.current.unloadAsync();
       } catch (error) {
         console.error('Error cleaning up sound:', error);
       }
+      soundRef.current = null;
     }
   };
 
@@ -397,15 +584,15 @@ export default function App() {
     );
   }
 
-  const glowColor = glowAnim.interpolate({
+  const glowOpacity = glowAnim.interpolate({
     inputRange: [0, 1],
-    outputRange: ['rgba(0, 212, 255, 0)', 'rgba(0, 212, 255, 0.5)'],
+    outputRange: [0, 0.6],
   });
 
   return (
     <LinearGradient colors={['#1a1a2e', '#16213e', '#0f3460']} style={styles.container}>
       <StatusBar style="light" />
-      
+
       <View style={styles.channelHeader}>
         <View>
           <Text style={styles.channelName}>#{currentChannel}</Text>
@@ -438,16 +625,23 @@ export default function App() {
         <Text style={styles.talkInstructions}>
           {isTalking ? 'Release to stop talking' : 'Press and hold to talk'}
         </Text>
-        
+
         <Animated.View
           style={[
             styles.talkButtonShadow,
             {
               transform: [{ scale: pulseAnim }],
-              shadowColor: glowColor,
             },
           ]}
         >
+          <Animated.View
+            style={[
+              styles.talkButtonGlow,
+              {
+                opacity: glowOpacity,
+              },
+            ]}
+          />
           <TouchableOpacity
             style={[styles.talkButton, isTalking && styles.talkButtonActive]}
             onPressIn={startRecording}
@@ -663,10 +857,17 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   talkButtonShadow: {
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 1,
-    shadowRadius: 30,
-    elevation: 10,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  talkButtonGlow: {
+    position: 'absolute',
+    width: 200,
+    height: 200,
+    borderRadius: 100,
+    backgroundColor: '#00d4ff',
+    zIndex: -1,
   },
   talkButton: {
     width: 180,
@@ -675,6 +876,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 4,
     borderColor: 'rgba(255, 255, 255, 0.3)',
+    zIndex: 1,
   },
   talkButtonActive: {
     borderColor: 'rgba(255, 71, 87, 0.5)',
@@ -692,4 +894,3 @@ const styles = StyleSheet.create({
     color: '#fff',
   },
 });
-
