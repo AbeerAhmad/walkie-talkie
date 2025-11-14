@@ -1,22 +1,22 @@
 {
-    "name": "walkie-talkie-workspace",
-    "version": "1.0.0",
-    "description": "Walkie Talkie App - Real-time Push-to-Talk Communication",
-    "scripts": {
-        "install-all": "cd backend && npm install && cd ../frontend && npm install",
-        "start-backend": "cd backend && npm start",
-        "start-frontend": "cd frontend && npm start",
-        "dev-backend": "cd backend && npm run dev"
-    },
-    "keywords": [
-        "walkie-talkie",
-        "react-native",
-        "expo",
-        "nodejs",
-        "socket.io",
-        "real-time",
-        "push-to-talk"
-    ],
-    "author": "",
-    "license": "MIT"
+  "name": "walkie-talkie-workspace",
+  "version": "1.0.0",
+  "description": "Walkie Talkie App - Real-time Push-to-Talk Communication",
+  "scripts": {
+    "install-all": "cd backend && npm install && cd ../frontend && npm install",
+    "start-backend": "node api.js && cd backend && npm start",
+    "start-frontend": "node api.js && cd frontend && npm start",
+    "dev-backend": "node api.js && cd backend && npm run dev"
+  },
+  "keywords": [
+    "walkie-talkie",
+    "react-native",
+    "expo",
+    "nodejs",
+    "socket.io",
+    "real-time",
+    "push-to-talk"
+  ],
+  "author": "",
+  "license": "MIT"
 }

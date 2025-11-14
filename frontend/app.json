@@ -3,6 +3,16 @@
     "name": "Walkie Talkie",
     "slug": "walkie-talkie-app",
     "version": "1.0.0",
+    "android": {
+      "package": "com.abeer.walkietalkie",
+      "permissions": ["RECORD_AUDIO", "INTERNET"]
+    },
+    "ios": {
+      "bundleIdentifier": "com.abeer.walkietalkie",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "This app needs access to your microphone for walkie talkie audio."
+      }
+    },
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {
@@ -11,23 +21,8 @@
     },
     "assetBundlePatterns": [
       "**/*"
-    ],
-    "ios": {
-      "supportsTablet": true,
-      "infoPlist": {
-        "NSMicrophoneUsageDescription": "This app needs access to your microphone for voice communication.",
-        "UIBackgroundModes": ["audio"]
-      }
-    },
-    "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#1a1a2e"
-      },
-      "permissions": [
-        "RECORD_AUDIO",
-        "MODIFY_AUDIO_SETTINGS"
-      ]
-    }
+    ]
+  
+    
   }
 }
-
